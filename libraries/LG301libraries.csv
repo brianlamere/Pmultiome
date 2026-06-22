@@ -1,0 +1,3 @@
+fastqs,sample,library_type
+/projects1/newmulti/input/LG301/GEX,LG301_GEX,Gene Expression
+/projects1/newmulti/input/LG301/ATAC,LG301_ATAC,Chromatin Accessibility
