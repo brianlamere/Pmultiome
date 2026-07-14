@@ -148,17 +148,18 @@ def main():
         if not raw_h5.exists():
             sys.exit(f"FATAL [{sample}]: {raw_h5} not found.")
 
-        cellranger_estimate = read_cellranger_estimate(cra_sample_dir)
-        total_droplets = cellranger_estimate * 3
-        print(f"  CellRanger estimated cells: {cellranger_estimate}  "
-              f"(using as --expected-cells, --total-droplets-included {total_droplets})")
+        expected_cells_estimate = overrides.get(sample, {}).get("expected_cells") or read_cellranger_estimate(cra_sample_dir)
+        total_droplets = overrides.get(sample, {}).get("total_droplets_included") or expected_cells_estimate * 3
+        source = "manifest override" if sample in overrides else "CellRanger estimate"
+        print(f"  Estimated cells: {expected_cells_estimate} ({source}, "
+              f"--total-droplets-included {total_droplets})")
 
         sample_cb_dir = CB_DATA_DIR / sample
         gex_h5 = sample_cb_dir / GEX_H5_NAME
         extract_gex(raw_h5, gex_h5)
 
         cb_output = sample_cb_dir / "cellbender_gex.h5"
-        run_cellbender(gex_h5, cb_output, cellranger_estimate, total_droplets)
+        run_cellbender(gex_h5, cb_output, expected_cells_estimate, total_droplets)
 
         filtered_output = sample_cb_dir / "cellbender_gex_filtered.h5"
         final_path = sample_cb_dir / FINAL_H5_NAME
