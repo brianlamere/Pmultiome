@@ -4,10 +4,10 @@ run_cellbender.py — run CellBender remove-background per sample, driven by
 manifest.csv.
 
 For each unique real_sample_name in the manifest:
-    1. Read cra_out/<sample>/summary.csv for the record (printed, not acted
-       on -- CellBender self-infers --expected-cells/--total-droplets per
-       current best practice; this is just so you can eyeball it against
-       what CellBender reports).
+    1. Read cra_out/<sample>/summary.csv for CellRanger's own "Estimated
+       number of cells", and use it as --expected-cells (with
+       --total-droplets-included set to 3x that). CellBender's own
+       self-inference under-calls on this lab's overloaded runs.
     2. Extract Gene Expression features from
        cra_out/<sample>/raw_feature_bc_matrix.h5 into
        cb_data/<sample>/raw_gex.h5 (CellRanger v3 h5 format). CellBender
@@ -17,8 +17,7 @@ For each unique real_sample_name in the manifest:
        cb_data/<sample>/cellbender_gex_filtered.h5 (the path
        system_settings.R expects).
 
-If a sample needs different handling (different --expected-cells, a
-different learning rate, whatever), run cellbender by hand for that one
+If a sample needs different handling, run cellbender by hand for that one
 sample. This script does the common case only.
 """
 
@@ -26,8 +25,8 @@ import csv
 import sys
 from pathlib import Path
 
-CRA_OUT_DIR = Path("cra_out")
-CB_DATA_DIR = Path("cb_data")
+CRA_OUT_DIR = Path("../cra_out")
+CB_DATA_DIR = Path("../cb_data")
 RAW_H5_NAME = "raw_feature_bc_matrix.h5"
 GEX_H5_NAME = "raw_gex.h5"
 FINAL_H5_NAME = "cellbender_gex_filtered.h5"  # must match cellbender_rna_h5filename in system_settings.R
@@ -110,7 +109,7 @@ def extract_gex(raw_h5_path: Path, out_h5_path: Path):
     print(f"  wrote {out_h5_path}")
 
 
-def run_cellbender(input_h5: Path, output_h5: Path):
+def run_cellbender(input_h5: Path, output_h5: Path, expected_cells: int, total_droplets: int):
     import subprocess
     if output_h5.exists():
         print(f"  SKIP cellbender (output already exists): {output_h5}")
@@ -119,6 +118,8 @@ def run_cellbender(input_h5: Path, output_h5: Path):
     cmd = ["cellbender", "remove-background",
            "--input", str(input_h5.resolve()),
            "--output", str(output_h5.resolve()),
+           "--expected-cells", str(expected_cells),
+           "--total-droplets-included", str(total_droplets),
            "--cuda"]
     print(f"  running: {' '.join(cmd)}")
     try:
@@ -148,14 +149,16 @@ def main():
             sys.exit(f"FATAL [{sample}]: {raw_h5} not found.")
 
         cellranger_estimate = read_cellranger_estimate(cra_sample_dir)
-        print(f"  CellRanger estimated cells: {cellranger_estimate}  (for reference only)")
+        total_droplets = cellranger_estimate * 3
+        print(f"  CellRanger estimated cells: {cellranger_estimate}  "
+              f"(using as --expected-cells, --total-droplets-included {total_droplets})")
 
         sample_cb_dir = CB_DATA_DIR / sample
         gex_h5 = sample_cb_dir / GEX_H5_NAME
         extract_gex(raw_h5, gex_h5)
 
         cb_output = sample_cb_dir / "cellbender_gex.h5"
-        run_cellbender(gex_h5, cb_output)
+        run_cellbender(gex_h5, cb_output, cellranger_estimate, total_droplets)
 
         filtered_output = sample_cb_dir / "cellbender_gex_filtered.h5"
         final_path = sample_cb_dir / FINAL_H5_NAME
