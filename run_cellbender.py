@@ -8,6 +8,12 @@ For each unique real_sample_name in the manifest:
        number of cells", and use it as --expected-cells (with
        --total-droplets-included set to 3x that). CellBender's own
        self-inference under-calls on this lab's overloaded runs.
+
+       Per-sample overrides for expected_cells and/or total_droplets_included
+       may be set in manifest.csv (add those columns; leave blank for the
+       standard behaviour). Overrides are recorded in the run log so the
+       deviation is visible without reading the manifest separately.
+
     2. Extract Gene Expression features from
        cra_out/<sample>/raw_feature_bc_matrix.h5 into
        cb_data/<sample>/raw_gex.h5 (CellRanger v3 h5 format). CellBender
@@ -17,8 +23,8 @@ For each unique real_sample_name in the manifest:
        cb_data/<sample>/cellbender_gex_filtered.h5 (the path
        system_settings.R expects).
 
-If a sample needs different handling, run cellbender by hand for that one
-sample. This script does the common case only.
+All samples run with the same code path. Per-sample parameter differences
+live in the manifest, not in script logic.
 """
 
 import csv
@@ -38,6 +44,74 @@ def get_unique_samples(manifest_path: Path):
         f.readline()  # Tissue: ...
         rows = list(csv.DictReader(f))
     return sorted({row["real_sample_name"] for row in rows})
+
+
+def read_manifest_overrides(manifest_path: Path) -> dict:
+    """Return per-sample CellBender parameter overrides from manifest.csv.
+
+    Recognises two optional columns: expected_cells and
+    total_droplets_included. Either or both may be present; either or both
+    may be blank for any given sample (blank == use standard behaviour).
+
+    Because each sample appears on multiple rows (one per modality), the
+    first non-empty value found for each column wins. Conflicting values
+    across rows for the same sample are flagged as a warning -- the manifest
+    should be the single source of truth, so ambiguity there is worth
+    surfacing rather than silently resolving.
+
+    Returns a dict keyed by real_sample_name whose values are dicts with
+    only the keys that actually have overrides set, e.g.:
+        {
+            "LG38": {"expected_cells": 56664, "total_droplets_included": 100000},
+        }
+    Samples with no overrides do not appear in the dict at all, so a simple
+    `overrides.get(sample, {})` in the caller is always safe.
+    """
+    override_columns = {"expected_cells", "total_droplets_included"}
+
+    with open(manifest_path) as f:
+        f.readline()  # reference: ...
+        f.readline()  # Tissue: ...
+        rows = list(csv.DictReader(f))
+
+    # Which override columns are actually present in this manifest?
+    if not rows:
+        return {}
+    present = override_columns & rows[0].keys()
+    if not present:
+        return {}
+
+    overrides = {}          # real_sample_name -> {col: int}
+    seen_values = {}        # real_sample_name -> {col: value_from_first_row}
+
+    for row in rows:
+        sample = row["real_sample_name"]
+        for col in present:
+            raw = row.get(col, "").strip()
+            if not raw:
+                continue
+            try:
+                value = int(raw)
+            except ValueError:
+                sys.exit(
+                    f"ERROR: manifest column '{col}' for sample '{sample}' "
+                    f"must be an integer or blank, got: {raw!r}"
+                )
+            if sample not in seen_values:
+                seen_values[sample] = {}
+            if col in seen_values[sample]:
+                if seen_values[sample][col] != value:
+                    print(
+                        f"WARNING: manifest has conflicting values for "
+                        f"'{col}' on sample '{sample}': "
+                        f"{seen_values[sample][col]} vs {value}. "
+                        f"Using the first value seen ({seen_values[sample][col]})."
+                    )
+            else:
+                seen_values[sample][col] = value
+                overrides.setdefault(sample, {})[col] = value
+
+    return overrides
 
 
 def read_cellranger_estimate(cra_sample_dir: Path):
@@ -63,8 +137,6 @@ def extract_gex(raw_h5_path: Path, out_h5_path: Path):
     from scipy.sparse import csc_matrix
 
     print(f"  reading {raw_h5_path}...")
-    # gex_only=False: scanpy's default silently drops Peaks before our
-    # own feature_types filter below would ever run.
     adata = sc.read_10x_h5(str(raw_h5_path), gex_only=False)
     gex = adata[:, adata.var["feature_types"] == "Gene Expression"].copy()
     print(f"  extracted {gex.n_vars} Gene Expression features x {gex.n_obs} barcodes "
@@ -80,7 +152,7 @@ def extract_gex(raw_h5_path: Path, out_h5_path: Path):
 
     X = gex.X
     X = (X.tocsc() if hasattr(X, "tocsc") else csc_matrix(X))
-    X = X.T.tocsc()  # CellRanger h5 stores genes x barcodes
+    X = X.T.tocsc()
 
     gene_ids = (gex.var["gene_ids"].astype(str).to_numpy()
                 if "gene_ids" in gex.var.columns else gex.var_names.astype(str).to_numpy())
@@ -90,8 +162,6 @@ def extract_gex(raw_h5_path: Path, out_h5_path: Path):
               if "genome" in gex.var.columns else np.array([""] * n_genes, dtype=str))
     barcodes = gex.obs_names.astype(str).to_numpy()
 
-    # Fixed-width byte strings, not h5py's vlen dtype: PyTables (which
-    # CellBender's loader uses) can't read vlen strings.
     with h5py.File(out_h5_path, "w") as f:
         m = f.create_group("matrix")
         m.create_dataset("barcodes", data=barcodes.astype("S"))
@@ -136,7 +206,12 @@ def main():
     manifest_path = Path(sys.argv[1])
 
     samples = get_unique_samples(manifest_path)
-    print(f"{len(samples)} unique sample(s) in manifest: {samples}\n")
+    overrides = read_manifest_overrides(manifest_path)
+
+    print(f"{len(samples)} unique sample(s) in manifest: {samples}")
+    if overrides:
+        print(f"Per-sample manifest overrides found for: {sorted(overrides.keys())}")
+    print()
 
     for sample in samples:
         print(f"=== {sample} ===")
@@ -148,18 +223,28 @@ def main():
         if not raw_h5.exists():
             sys.exit(f"FATAL [{sample}]: {raw_h5} not found.")
 
-        expected_cells_estimate = overrides.get(sample, {}).get("expected_cells") or read_cellranger_estimate(cra_sample_dir)
-        total_droplets = overrides.get(sample, {}).get("total_droplets_included") or expected_cells_estimate * 3
-        source = "manifest override" if sample in overrides else "CellRanger estimate"
-        print(f"  Estimated cells: {expected_cells_estimate} ({source}, "
-              f"--total-droplets-included {total_droplets})")
+        sample_overrides = overrides.get(sample, {})
+
+        if "expected_cells" in sample_overrides:
+            expected_cells = sample_overrides["expected_cells"]
+            print(f"  expected_cells: {expected_cells} (manifest override)")
+        else:
+            expected_cells = read_cellranger_estimate(cra_sample_dir)
+            print(f"  expected_cells: {expected_cells} (CellRanger estimate)")
+
+        if "total_droplets_included" in sample_overrides:
+            total_droplets = sample_overrides["total_droplets_included"]
+            print(f"  total_droplets_included: {total_droplets} (manifest override)")
+        else:
+            total_droplets = expected_cells * 3
+            print(f"  total_droplets_included: {total_droplets} (3x expected_cells)")
 
         sample_cb_dir = CB_DATA_DIR / sample
         gex_h5 = sample_cb_dir / GEX_H5_NAME
         extract_gex(raw_h5, gex_h5)
 
         cb_output = sample_cb_dir / "cellbender_gex.h5"
-        run_cellbender(gex_h5, cb_output, expected_cells_estimate, total_droplets)
+        run_cellbender(gex_h5, cb_output, expected_cells, total_droplets)
 
         filtered_output = sample_cb_dir / "cellbender_gex_filtered.h5"
         final_path = sample_cb_dir / FINAL_H5_NAME

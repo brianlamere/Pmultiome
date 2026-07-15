@@ -1,14 +1,14 @@
 reference: ../references/CellRanger-GRCh38_HXB2
 Tissue: spleen
-fastq_sample_name,real_sample_name,modality
+fastq_sample_name,real_sample_name,modality,expected_cells,total_droplets_included
 13-3GEX,LG26,GEX
 13-ATAC,LG26,ATAC
 14-3GEX,LG31,GEX
 14-ATAC,LG31,ATAC
 17-3GEX,LG22,GEX
 17-ATAC,LG22,ATAC
-20-3GEX,LG38,GEX
-20-ATAC,LG38,ATAC
+20-3GEX,LG38,GEX,56664,85000,2
+20-ATAC,LG38,ATAC,56664,85000,2
 23-3GEX,LG300,GEX
 23-ATAC,LG300,ATAC
 25-3GEX,LG301,GEX
